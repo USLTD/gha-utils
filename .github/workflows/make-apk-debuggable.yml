@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       apk_url:
-        description: "Direct download URL of the APK to modify"
+        description: Direct download URL of the APK to modify
         required: true
         type: string
 
@@ -15,49 +15,50 @@ jobs:
   modify-apk:
     name: Download, Decompile, Patch, Rebuild, Sign
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
       BUILD_TOOLS_VERSION: 34.0.0
       APKTOOL_VERSION: 2.9.3
 
     steps:
-      - name: Checkout (for workspace context)
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Validate input
         run: |
           if [ -z "${{ github.event.inputs.apk_url }}" ]; then
-            echo "apk_url input is empty"; exit 1;
+            echo "apk_url input is empty"
+            exit 1
           fi
           echo "APK URL: ${{ github.event.inputs.apk_url }}"
 
       - name: Install base dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends wget unzip zip lib32stdc++6 lib32z1 openjdk-17-jdk python3
-          java -version
-          python3 --version
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends \
+              wget unzip zip lib32stdc++6 lib32z1 openjdk-17-jdk xmlstarlet
+            java -version
+            xmlstarlet --version
 
       - name: Set up Android commandline tools
         run: |
-          mkdir -p "$ANDROID_SDK_ROOT"/cmdline-tools
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
           cd "$ANDROID_SDK_ROOT"
           wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdtools.zip
           unzip -q cmdtools.zip
           rm cmdtools.zip
           mv cmdline-tools cmdline-tools/latest
-          yes | cmdline-tools/latest/bin/sdkmanager --sdk_root="$ANDROID_SDK_ROOT" "platform-tools" "build-tools;$BUILD_TOOLS_VERSION"
-          echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
-          echo "$ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS_VERSION" >> $GITHUB_PATH
+          yes | cmdline-tools/latest/bin/sdkmanager --sdk_root="$ANDROID_SDK_ROOT" \
+            "platform-tools" "build-tools;$BUILD_TOOLS_VERSION"
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          echo "$ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS_VERSION" >> "$GITHUB_PATH"
 
       - name: Install apktool
         run: |
-          cd /usr/local/bin
-            # Wrapper script
-            sudo wget -q https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool -O apktool
-            sudo chmod +x apktool
-          cd /usr/local/lib
-            sudo wget -q https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VERSION}/apktool_${APKTOOL_VERSION}.jar -O apktool.jar
+          sudo wget -q https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool -O /usr/local/bin/apktool
+          sudo chmod +x /usr/local/bin/apktool
+          sudo wget -q https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VERSION}/apktool_${APKTOOL_VERSION}.jar -O /usr/local/lib/apktool.jar
           apktool --version
 
       - name: Download APK
@@ -66,13 +67,13 @@ jobs:
           set -e
           mkdir -p original
           cd original
-          # Follow redirects, keep filename if possible
           curl -L -o app.apk "${{ github.event.inputs.apk_url }}"
           if [ ! -s app.apk ]; then
-            echo "Downloaded APK is empty"; exit 1;
+            echo "Downloaded APK is empty"
+            exit 1
           fi
           file app.apk || true
-          echo "size=$(stat -c%s app.apk)" >> $GITHUB_OUTPUT
+          echo "size=$(stat -c%s app.apk)" >> "$GITHUB_OUTPUT"
           echo "Downloaded APK size: $(stat -c%s app.apk) bytes"
 
       - name: Decompile APK
@@ -81,44 +82,30 @@ jobs:
           mkdir -p work
           apktool d -f original/app.apk -o work/decompiled
 
-      - name: Patch AndroidManifest (set application android:debuggable=\"true\")
+      - name: Patch AndroidManifest (xmlstarlet)
         run: |
           set -e
           MANIFEST="work/decompiled/AndroidManifest.xml"
           if [ ! -f "$MANIFEST" ]; then
-            echo "Manifest not found"; exit 1;
+            echo "Manifest not found"
+            exit 1
           fi
-          echo "Patching $MANIFEST"
-          python3 - <<'PY'
-import re, sys, pathlib
-manifest_path = pathlib.Path("work/decompiled/AndroidManifest.xml")
-xml = manifest_path.read_text(encoding="utf-8")
-
-# Simple approach: find the <application ...> opening tag.
-pattern = re.compile(r'<application\b([^>]*)>', re.DOTALL)
-m = pattern.search(xml)
-if not m:
-    print("No <application> tag found", file=sys.stderr)
-    sys.exit(1)
-
-attrs = m.group(1)
-
-# Namespace usually declared; ensure we reference android:debuggable
-if 'android:debuggable=' in attrs:
-    # Replace existing value
-    attrs_new = re.sub(r'android:debuggable\s*=\s*"[^"]*"', 'android:debuggable="true"', attrs)
-else:
-    # Insert attribute (keep formatting: add space then attribute before closing bracket)
-    attrs_new = attrs.rstrip() + ' android:debuggable="true"'
-
-if attrs == attrs_new:
-    print("No change necessary.")
-else:
-    xml = xml[:m.start(1)] + attrs_new + xml[m.end(1):]
-    manifest_path.write_text(xml, encoding="utf-8")
-    print("Manifest patched: android:debuggable=true")
-PY
-          grep -n "application" "$MANIFEST" | head -5 || true
+          echo "Before patch (first application line):"
+          grep -n "<application" "$MANIFEST" | head -1 || true
+          # Add android:debuggable if missing
+          xmlstarlet ed -P -L \
+            -N a="http://schemas.android.com/apk/res/android" \
+            -s "/manifest/application[not(@a:debuggable)]" -t attr -n "android:debuggable" -v "true" \
+            "$MANIFEST"
+          # Force value to true
+            xmlstarlet ed -P -L \
+              -N a="http://schemas.android.com/apk/res/android" \
+              -u "/manifest/application/@a:debuggable" -v "true" \
+              "$MANIFEST"
+          echo "After patch (first application line):"
+          grep -n "<application" "$MANIFEST" | head -1 || true
+          echo -n "Final debuggable attribute value: "
+          xmlstarlet sel -N a="http://schemas.android.com/apk/res/android" -t -v "string(/manifest/application/@a:debuggable)" -n "$MANIFEST"
 
       - name: Rebuild APK
         run: |
@@ -165,7 +152,7 @@ PY
           echo "Original APK SHA256:"
           cat original_apk.sha256
           echo "Modified APK SHA256:"
-            cat modified_apk.sha256
+          cat modified_apk.sha256
 
       - name: Upload modified APK artifact
         uses: actions/upload-artifact@v4
@@ -185,6 +172,3 @@ PY
           echo "SHA256:"
           cat modified_apk.sha256
           echo "Note: Use only on APKs you are authorized to analyze and modify."
-
-    # (Optional) Add a timeout to avoid hanging jobs
-    timeout-minutes: 30
