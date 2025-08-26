@@ -46,6 +46,7 @@ jobs:
         with:
           accept-android-sdk-licenses: yes
           log-accepted-android-sdk-licenses: false
+          packages: 'platform-tools build-tools;${{ env.$BUILD_TOOLS_VERSION }}'
 
       - name: Install apktool
         run: |
